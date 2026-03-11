@@ -6,23 +6,32 @@ Demonstrates Microsoft Agent Framework WorkflowBuilder with:
 - order update branch
 - explicit state updates via WorkflowContext.set_state/get_state
 - DevUI integration for graph visualization
+- OpenTelemetry instrumentation with sensitive data (full payloads, tool calls, metrics)
 
 Run:
     uv run .\\worflow_conditional.py
     uv run .\\worflow_conditional.py --devui
+
+OTel env vars (optional):
+    ENABLE_CONSOLE_EXPORTERS=true        Print spans/metrics to console
+    OTEL_EXPORTER_OTLP_ENDPOINT=...      Export to Jaeger/OTLP collector
 """
 
 import asyncio
 import json
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
+
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 _GREETING_WORDS = {"hello", "hi", "hey", "greetings", "howdy", "hola", "good morning", "good afternoon", "good evening"}
 
 from agent_framework import WorkflowBuilder, WorkflowContext, executor
 from agent_framework.exceptions import ChatClientException
+from agent_framework.observability import configure_otel_providers
 from agent_framework.openai import OpenAIChatClient
 from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
 from dotenv import load_dotenv
@@ -33,6 +42,73 @@ from order_flow import OrderFlow
 
 
 load_dotenv(override=True)
+
+
+# ---------------------------------------------------------------------------
+# Custom OTel span exporter: extracts only relevant agent context
+# ---------------------------------------------------------------------------
+_RELEVANT_EVENT_NAMES = {
+    "gen_ai.system.message",
+    "gen_ai.user.message",
+    "gen_ai.assistant.message",
+    "gen_ai.tool.message",
+    "gen_ai.choice",
+}
+
+_RELEVANT_ATTRIBUTES = {
+    "gen_ai.operation.name",
+    "gen_ai.request.model",
+    "gen_ai.response.model",
+    "gen_ai.response.finish_reasons",
+    "gen_ai.response.id",
+    "gen_ai.usage.input_tokens",
+    "gen_ai.usage.output_tokens",
+    "gen_ai.agent.name",
+    "gen_ai.agent.id",
+    "gen_ai.tool.name",
+    "gen_ai.tool.call.id",
+    "gen_ai.tool.call.arguments",
+    "gen_ai.tool.call.result",
+    "executor.id",
+    "workflow.name",
+}
+
+
+class AgentContextExporter(SpanExporter):
+    """Span exporter that prints only relevant agent context to the console."""
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        for span in spans:
+            attrs = dict(span.attributes or {})
+            context_attrs = {k: v for k, v in attrs.items() if k in _RELEVANT_ATTRIBUTES}
+            events = []
+            for event in span.events or []:
+                if event.name in _RELEVANT_EVENT_NAMES:
+                    events.append({"event": event.name, "data": dict(event.attributes or {})})
+
+            if not context_attrs and not events:
+                continue
+
+            record: dict[str, Any] = {"span": span.name}
+            if context_attrs:
+                record["attributes"] = context_attrs
+            if events:
+                record["events"] = events
+
+            print(f"\n--- Agent Context ---\n{json.dumps(record, indent=2, default=str)}\n--- End Context ---")
+
+        return SpanExportResult.SUCCESS
+
+    def shutdown(self) -> None:
+        pass
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return True
+
+
+def enable_agent_context_tracing() -> None:
+    """Enable OTel with a filtered exporter that prints only relevant agent context."""
+    configure_otel_providers(enable_sensitive_data=True, exporters=[AgentContextExporter()])
 
 
 async_credential: DefaultAzureCredential | None = None
@@ -463,6 +539,8 @@ def run_devui() -> None:
 
 
 if __name__ == "__main__":
+    if "--otel" in sys.argv or "-otel" in sys.argv:
+        enable_agent_context_tracing()
     if "--devui" in sys.argv or "-devui" in sys.argv:
         run_devui()
     else:

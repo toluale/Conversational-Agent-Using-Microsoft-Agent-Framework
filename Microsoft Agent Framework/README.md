@@ -9,7 +9,9 @@ ms.date: 2026-03-11
 This prototype demonstrates a multi-turn restaurant ordering chatbot using the
 [Microsoft Agent Framework](https://github.com/microsoft/agent-framework) `WorkflowBuilder`.
 It routes customer messages through intent classification, order management, and
-brand-personalized response generation with real-time streaming output.
+brand-personalized response generation with real-time streaming output. OpenTelemetry
+instrumentation provides visibility into agent internals, including LLM calls,
+token usage, intent routing, and workflow execution.
 
 ## Architecture
 
@@ -31,7 +33,7 @@ The workflow uses conditional edges to branch based on detected intent:
 
 | File                     | Purpose                                          |
 |--------------------------|--------------------------------------------------|
-| `workflow_conditional.py` | Workflow orchestrator, CLI and DevUI entry points |
+| `workflow_conditional.py` | Workflow orchestrator, CLI, DevUI, and OTel entry points |
 | `classification_flow.py`  | Intent classifier (order vs. conversation)        |
 | `order_flow.py`           | Order extraction and update agent                 |
 | `conversation_flow.py`    | Attendant response generation with streaming      |
@@ -47,6 +49,7 @@ The workflow uses conditional edges to branch based on detected intent:
 - Configurable brand personalities (Contoso)
 - Customer style adaptation (formal, casual, Gen Z)
 - DevUI graph visualization for workflow debugging
+- OpenTelemetry tracing with a custom span exporter for agent context
 - Robust multi-tier LLM output parsing with fallbacks
 
 ## Prerequisites
@@ -63,7 +66,7 @@ The workflow uses conditional edges to branch based on detected intent:
 
    ```env
    OPENAI_API_KEY=sk-...
-   OPENAI_MODEL=gpt-4o-mini
+   OPENAI_MODEL=gpt-5-mini
    ```
 
    For Azure OpenAI, uncomment the Azure section in `build_client()` and set:
@@ -103,6 +106,35 @@ uv run .\workflow_conditional.py --devui
 
 This opens a web interface at `http://localhost:8094` where you can send messages
 and see the workflow graph execution in real time.
+
+### OTel Tracing Mode
+
+Enable OpenTelemetry instrumentation to inspect agent internals during a CLI session:
+
+```bash
+uv run .\workflow_conditional.py --otel
+```
+
+This activates a custom `AgentContextExporter` that filters and prints relevant
+span data after each workflow turn. The exporter surfaces:
+
+- LLM call attributes (model, operation, finish reasons)
+- Token usage (input and output token counts per call)
+- Agent and executor identification (agent name, executor ID, workflow name)
+- Tool call metadata (tool name, call ID, arguments, results)
+- Message events (system, user, assistant, and tool messages when available)
+
+Combine with the built-in console exporter for full unfiltered span output:
+
+```env
+ENABLE_CONSOLE_EXPORTERS=true
+```
+
+Or export to an OTLP collector (Jaeger, Aspire Dashboard):
+
+```env
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+```
 
 ## Project Structure
 
