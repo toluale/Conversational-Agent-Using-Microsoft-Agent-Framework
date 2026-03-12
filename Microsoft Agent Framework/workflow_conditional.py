@@ -29,7 +29,7 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 _GREETING_WORDS = {"hello", "hi", "hey", "greetings", "howdy", "hola", "good morning", "good afternoon", "good evening"}
 
-from agent_framework import WorkflowBuilder, WorkflowContext, executor
+from agent_framework import Case, Default, WorkflowBuilder, WorkflowContext, WorkflowEvent, executor
 from agent_framework.exceptions import ChatClientException
 from agent_framework.observability import configure_otel_providers
 from agent_framework.openai import OpenAIChatClient
@@ -315,6 +315,8 @@ def create_chat_workflow(
         _save_session_state(ctx, session_state)
         await ctx.send_message(json.dumps(envelope, ensure_ascii=True))
 
+    _TOOL_CONTENT_TYPES = {"function_call", "function_result"}
+
     @executor(id="respond")
     async def respond(envelope_json: str, ctx: WorkflowContext[str, dict]) -> None:
         envelope = json.loads(envelope_json)
@@ -324,16 +326,21 @@ def create_chat_workflow(
 
         # Use streaming to collect the response chunk by chunk
         chunks: list[str] = []
-        async for chunk in conversation_flow.stream_respond(
+        async for update in conversation_flow.stream_respond(
             chat_history=envelope["chat_history"],
             current_order=envelope["current_order"],
             brand_instructions=brand_instructions,
             customer_style_instructions=customer_style_instructions,
             order_summary=envelope.get("order_summary", ""),
         ):
-            chunks.append(chunk)
-            if stream_callback:
-                stream_callback(chunk)
+            # Emit tool-related updates as workflow data events so DevUI displays them
+            if any(c.type in _TOOL_CONTENT_TYPES for c in update.contents):
+                await ctx.add_event(WorkflowEvent.emit("respond", update))
+            chunk = update.text
+            if chunk:
+                chunks.append(chunk)
+                if stream_callback:
+                    stream_callback(chunk)
         assistant_reply = "".join(chunks).strip()
 
         envelope["chat_history"].append({"role": "assistant", "content": assistant_reply})
@@ -363,16 +370,20 @@ def create_chat_workflow(
         # Stream a greeting response
         chunks: list[str] = []
         greeting_history = envelope["chat_history"][-2:]  # Just the greeting message
-        async for chunk in conversation_flow.stream_respond(
+        async for update in conversation_flow.stream_respond(
             chat_history=greeting_history,
             current_order=envelope["current_order"],
             brand_instructions=brand_instructions,
             customer_style_instructions=customer_style_instructions,
             order_summary="",
         ):
-            chunks.append(chunk)
-            if stream_callback:
-                stream_callback(chunk)
+            if any(c.type in _TOOL_CONTENT_TYPES for c in update.contents):
+                await ctx.add_event(WorkflowEvent.emit("greet", update))
+            chunk = update.text
+            if chunk:
+                chunks.append(chunk)
+                if stream_callback:
+                    stream_callback(chunk)
         assistant_reply = "".join(chunks).strip()
 
         envelope["chat_history"].append({"role": "assistant", "content": assistant_reply})
@@ -396,10 +407,15 @@ def create_chat_workflow(
 
     return (
         WorkflowBuilder(start_executor=route_intent, max_iterations=8)
-        .add_edge(route_intent, greet, condition=_is_greeting)
-        .add_edge(route_intent, update_order, condition=_is_order)
-        .add_edge(route_intent, skip_order_update, condition=_is_conversation)
-        .add_edge(route_intent, on_error)
+        .add_switch_case_edge_group(
+            route_intent,
+            [
+                Case(condition=_is_greeting, target=greet),
+                Case(condition=_is_order, target=update_order),
+                Case(condition=_is_conversation, target=skip_order_update),
+                Default(target=on_error),
+            ],
+        )
         .add_edge(update_order, respond)
         .add_edge(skip_order_update, respond)
         .build()
@@ -533,9 +549,10 @@ async def run_cli() -> None:
 def run_devui() -> None:
     from agent_framework.devui import serve
 
+    enable_agent_context_tracing()
     client = build_client()
     chat_workflow = create_chat_workflow(client)
-    serve(entities=[chat_workflow], port=8094, auto_open=True)
+    serve(entities=[chat_workflow], port=8094, auto_open=True, instrumentation_enabled=True)
 
 
 if __name__ == "__main__":
