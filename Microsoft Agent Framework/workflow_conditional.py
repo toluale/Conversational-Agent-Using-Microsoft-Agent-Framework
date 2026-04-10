@@ -19,6 +19,7 @@ OTel env vars (optional):
 
 import asyncio
 import json
+import logging
 import os
 import sys
 from collections.abc import Callable, Sequence
@@ -26,19 +27,26 @@ from typing import Any
 
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
-
-_GREETING_WORDS = {"hello", "hi", "hey", "greetings", "howdy", "hola", "good morning", "good afternoon", "good evening"}
-
 from agent_framework import Case, Default, WorkflowBuilder, WorkflowContext, WorkflowEvent, executor
+from agent_framework.azure import AzureOpenAIChatClient
 from agent_framework.exceptions import ChatClientException
-from agent_framework.observability import configure_otel_providers
-from agent_framework.openai import OpenAIChatClient
+from agent_framework.observability import configure_otel_providers, create_resource, enable_instrumentation
+
+from azure.monitor.opentelemetry import configure_azure_monitor
 from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
 from dotenv import load_dotenv
+
 from brand_personality import BrandPersonalityRegistry, get_customer_style_instructions
 from classification_flow import OrderIntentFlow
 from conversation_flow import ConversationFlow
 from order_flow import OrderFlow
+
+from rich import print
+from rich.logging import RichHandler
+
+_GREETING_WORDS = {"hello", "hi", "hey", "greetings", "howdy", "hola", "good morning", "good afternoon", "good evening"}
+
+_telemetry_initialized = False
 
 
 load_dotenv(override=True)
@@ -108,7 +116,32 @@ class AgentContextExporter(SpanExporter):
 
 def enable_agent_context_tracing() -> None:
     """Enable OTel with a filtered exporter that prints only relevant agent context."""
-    configure_otel_providers(enable_sensitive_data=True, exporters=[AgentContextExporter()])
+    global _telemetry_initialized
+
+    if _telemetry_initialized:
+        return
+
+    # Setup logging
+    handler = RichHandler(show_path=False, rich_tracebacks=True, show_level=False)
+    logging.basicConfig(level=logging.WARNING, handlers=[handler], force=True, format="%(message)s")
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+
+    connection_string = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "").strip()
+    if connection_string:
+        # Use Azure Monitor distro when App Insights is configured.
+        configure_azure_monitor(
+            connection_string=connection_string,
+            resource=create_resource("restaurant-ordering-agent"),
+            enable_live_metrics=True,
+        )
+    else:
+        # Use local OTel exporters when App Insights is not configured.
+        configure_otel_providers(enable_sensitive_data=True, exporters=[AgentContextExporter()])
+
+    enable_instrumentation(enable_sensitive_data=True)
+    _telemetry_initialized = True
+    logger.info("Agent context tracing enabled")
 
 
 async_credential: DefaultAzureCredential | None = None
@@ -131,22 +164,43 @@ def _require_env(name: str) -> str:
     return value
 
 
-def build_client() -> OpenAIChatClient:
+def _normalize_azure_endpoint(value: str) -> str:
+    """Normalize Azure OpenAI endpoint to resource root URL."""
+    endpoint = value.strip().rstrip("/")
+    marker = "/openai"
+    marker_pos = endpoint.lower().find(marker)
+    if marker_pos != -1:
+        endpoint = endpoint[:marker_pos]
+    return endpoint
+
+
+def build_client() -> AzureOpenAIChatClient:
     """Build a chat client from API_HOST settings."""
     global async_credential
-    """
-    api_host = os.getenv("API_HOST", "openai").strip().lower()
+    
+    api_host = os.getenv("API_HOST", "azure").strip().lower()
     if api_host == "azure":
-        endpoint = _require_env("AZURE_OPENAI_ENDPOINT").rstrip("/")
-        deployment = _require_env("AZURE_OPENAI_CHAT_DEPLOYMENT")
+        endpoint = _normalize_azure_endpoint(_require_env("AZURE_OPENAI_ENDPOINT"))
+        deployment = _require_env("AZURE_OPENAI_CHAT_DEPLOYMENT_NAME")
+
+        # Prefer API key auth when provided to avoid local Entra tenant mismatch failures.
+        api_key = os.getenv("AZURE_OPENAI_API_KEY", "").strip()
+        if api_key:
+            return AzureOpenAIChatClient(
+                endpoint=endpoint,
+                api_key=api_key,
+                deployment_name=deployment,
+            )
+
         async_credential = DefaultAzureCredential()
         token_provider = get_bearer_token_provider(async_credential, "https://cognitiveservices.azure.com/.default")
-        return OpenAIChatClient(
-            base_url=f"{endpoint}/openai/v1/",
-            api_key=token_provider,
-            model_id=deployment,
+        return AzureOpenAIChatClient(
+            endpoint=endpoint,
+            credential=token_provider,
+            deployment_name=deployment,
         )
-
+    raise RuntimeError("Unsupported API_HOST value. Use 'azure'.")
+    """
     if api_host == "github":
         token = _require_env("GITHUB_TOKEN")
         return OpenAIChatClient(
@@ -154,12 +208,13 @@ def build_client() -> OpenAIChatClient:
             api_key=token,
             model_id=os.getenv("GITHUB_MODEL", "openai/gpt-5-mini"),
         )
-    """
+    
     api_key = _require_env("OPENAI_API_KEY")
     return OpenAIChatClient(
         api_key=api_key,
-        model_id=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
-    )
+        model_id=os.environ.get("OPENAI_MODEL", "gpt-5-mini"))
+    """
+    
 
 
 def _is_order(envelope: Any) -> bool:
@@ -241,15 +296,15 @@ def _save_session_state(ctx: WorkflowContext[Any, Any], state: dict[str, Any]) -
 
 
 def create_chat_workflow(
-    client: OpenAIChatClient,
+    client: AzureOpenAIChatClient,
     brand_name: str = "Contoso Restaurant",
     customer_style: str = "formal",
     stream_callback: Callable[[str], None] | None = None,
 ):
-    """Create a DevUI-friendly chat workflow that accepts plain text input."""
-    intent_flow = OrderIntentFlow(client)
-    order_flow = OrderFlow(client)
-    conversation_flow = ConversationFlow(client)
+    """Create a chat workflow that accepts plain text input."""
+    intent_flow = OrderIntentFlow(client)   # Agent 1 - classifier
+    order_flow = OrderFlow(client)           # Agent 2 - order updater
+    conversation_flow = ConversationFlow(client)  # Agent 3 - conversation handler / response generator
     brand_registry = BrandPersonalityRegistry()
 
     @executor(id="route_intent")

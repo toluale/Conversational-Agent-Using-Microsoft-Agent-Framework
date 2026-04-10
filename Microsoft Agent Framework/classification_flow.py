@@ -4,6 +4,7 @@ from typing import Literal
 
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatClient
+from agent_framework.azure import AzureOpenAIChatClient
 from pydantic import BaseModel, ValidationError
 
 
@@ -15,7 +16,7 @@ class IntentDecision(BaseModel):
 class OrderIntentFlow:
     """Intent classification using Microsoft Agent Framework only."""
 
-    def __init__(self, client: OpenAIChatClient):
+    def __init__(self, client: AzureOpenAIChatClient):
         self._agent = Agent(
             client=client,
             name="OrderIntentClassifier",

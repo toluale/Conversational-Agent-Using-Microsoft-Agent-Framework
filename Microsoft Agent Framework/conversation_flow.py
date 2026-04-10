@@ -4,7 +4,7 @@ from typing import Annotated, AsyncGenerator
 
 from agent_framework import Agent, AgentResponseUpdate, tool
 from agent_framework.openai import OpenAIChatClient
-
+from agent_framework.azure import AzureOpenAIChatClient
 
 @tool
 def get_menu(
@@ -86,7 +86,7 @@ def confirm_order(**kwargs) -> str:
 class ConversationFlow:
     """Restaurant attendant response flow."""
 
-    def __init__(self, client: OpenAIChatClient):
+    def __init__(self, client: AzureOpenAIChatClient):
         self._agent = Agent(
             client=client,
             name="RestaurantAttendant",
@@ -95,10 +95,11 @@ class ConversationFlow:
                 "Be concise, accurate, and friendly. "
                 "If required order details are missing, ask one focused follow-up question. "
                 "When the order is clear, summarize items and ask for confirmation. "
-                "Use the get_menu tool to look up menu items, sizes, toppings, and options "
+                "Use the get_menu tool to look up menu items, sizes, toppings, and options"
                 "whenever the customer asks about the menu or you need to verify item availability. "
                 "Use the confirm_order tool when the customer wants to review, finalize, or check out "
                 "their order. The tool reads the current order automatically — no arguments needed."
+                "Encourage the customer towards confirming and placing their order, but be patient and helpful if they want to make changes. "
             ),
             tools=[get_menu, confirm_order],
         )
@@ -118,7 +119,7 @@ class ConversationFlow:
             "order_update_summary": order_summary or "",
             "recent_history": chat_history[-10:],
             "response_rules": [
-                "Keep the response under 120 words.",
+                "Keep the response under 200 words.",
                 "Do not invent menu items. Use get_menu to verify.",
                 "Use plain ASCII punctuation.",
             ],
@@ -142,7 +143,7 @@ class ConversationFlow:
             "order_update_summary": order_summary or "",
             "recent_history": chat_history[-10:],
             "response_rules": [
-                "Keep the response under 120 words.",
+                "Keep the response under 200 words.",
                 "Do not invent menu items. Use get_menu to verify.",
                 "Use plain ASCII punctuation.",
             ],

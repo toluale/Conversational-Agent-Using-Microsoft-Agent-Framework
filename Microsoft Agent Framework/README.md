@@ -74,7 +74,9 @@ The workflow uses conditional edges to branch based on detected intent:
    ```env
    API_HOST=azure
    AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
-   AZURE_OPENAI_CHAT_DEPLOYMENT=your-deployment-name
+   AZURE_OPENAI_CHAT_DEPLOYMENT_NAME=your-deployment-name
+   # Optional fallback for local auth issues:
+   # AZURE_OPENAI_API_KEY=your-azure-openai-key
    ```
 
 3. Install dependencies:
@@ -134,6 +136,33 @@ Or export to an OTLP collector (Jaeger, Aspire Dashboard):
 
 ```env
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+```
+
+### Aspire Dashboard (Local OTel Viewer)
+
+Start Aspire Dashboard (included in this repo):
+
+```bash
+docker compose -f docker-compose.aspire-dashboard.yml up -d
+```
+
+Open the dashboard:
+
+```text
+http://localhost:18888
+```
+
+Then run the app with tracing enabled:
+
+```bash
+uv run ./workflow_conditional.py --otel
+```
+
+Stop the dashboard when finished:
+
+```bash
+docker compose -f docker-compose.aspire-dashboard.yml down
 ```
 
 ## Project Structure

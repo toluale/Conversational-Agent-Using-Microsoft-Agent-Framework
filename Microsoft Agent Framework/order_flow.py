@@ -7,6 +7,7 @@ from typing import Any
 
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatClient
+from agent_framework.azure import AzureOpenAIChatClient
 from pydantic import BaseModel, Field, ValidationError
 
 from conversation_flow import get_menu, get_menu_with_codes
@@ -32,7 +33,7 @@ class OrderUpdate(BaseModel):
 class OrderFlow:
     """Order extraction/update flow implemented with Microsoft Agent Framework."""
 
-    def __init__(self, client: OpenAIChatClient):
+    def __init__(self, client: AzureOpenAIChatClient):
         self._agent = Agent(
             client=client,
             name="OrderUpdateAgent",
@@ -41,7 +42,7 @@ class OrderFlow:
                 "Return the full updated order each turn. "
                 "Always return JSON with keys: order and summary. "
                 "Only include items that appear on the restaurant menu. "
-                "Use the get_menu tool to look up available items and verify what is on the menu. "
+                "Use the get_menu tool to look up available items and verify what is on the menu when needed. "
                 "Use the get_menu_with_codes tool to resolve product codes when needed. "
                 "If user asks for non-menu items, keep order unchanged and mention it in summary."
             ),
